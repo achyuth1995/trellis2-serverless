@@ -1,0 +1,63 @@
+# ---------------------------------------------------------------------------
+# RunPod serverless image for the TRELLIS.2 finetuned pipeline (rp_handler.py),
+# matching compare_pretrained_finetuned4.py.
+#
+# This image installs NOTHING heavy: no torch, no CUDA extensions, no python
+# deps. The fully-built `trellis2` conda env, the repo, the HF cache and the
+# finetuned checkpoints all live on a RunPod Network Volume and are activated at
+# runtime -- exactly like the working box:
+#
+#     export HF_HOME=/workspace/hf_cache
+#     export HF_HUB_OFFLINE=1
+#     cd /workspace/
+#     source miniconda3/bin/activate
+#     conda activate conda/envs/trellis2/
+#
+# The volume is mounted by RunPod at /runpod-volume; the entrypoint symlinks it
+# to /workspace so every /workspace/... path above resolves unchanged.
+#
+#   docker build -f Dockerfile.runpod -t <you>/trellis2-serverless:latest .
+#   docker push <you>/trellis2-serverless:latest
+#
+# See RUNPOD_DEPLOY.md for the one-time volume setup (incl. `pip install runpod`
+# into the volume's conda env) and endpoint creation.
+# ---------------------------------------------------------------------------
+# CUDA *devel* base — REQUIRED, not optional. Although the conda env on the
+# volume bundles its own CUDA runtime libs, the pipeline JIT-COMPILES CUDA at
+# runtime on every fresh worker:
+#   * Triton (used by flex_gemm) compiles a driver stub -> needs a C compiler
+#     + the libcuda stub (in /usr/local/cuda/lib64/stubs).
+#   * nvdiffrast compiles its plugin on first render -> needs nvcc + headers
+#     (only when return_video=True, but keep the toolchain available).
+# A slim/runtime base lacks nvcc/gcc/headers/stubs and fails with
+# "Failed to find C compiler". The devel base matches the toolchain the env was
+# built against (see setup.sh). The image is large (~6GB) -> build it via CI
+# (GitHub Actions, .github/workflows/build-runpod.yml) or a machine with disk,
+# not a laptop. Only the tiny entrypoint is added on top; no torch/deps here.
+FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    OPENCV_IO_ENABLE_OPENEXR=1 \
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+    HF_HOME=/workspace/hf_cache \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    # inject the driver + all capabilities (compute for CUDA, graphics for
+    # nvdiffrast) at runtime via the NVIDIA container runtime.
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=all
+
+# Build toolchain for runtime JIT (Triton/nvdiffrast) + OS libs the pipeline
+# needs (OpenGL/GLib for OpenCV, OpenMP for torch, ffmpeg for the mp4). nvcc,
+# CUDA headers and the libcuda stub already come from the devel base.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential ninja-build \
+        libgl1 libglib2.0-0 libgomp1 libjpeg-turbo8 ffmpeg ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Entrypoint activates the volume's conda env and launches the handler.
+COPY runpod_entrypoint.sh /runpod_entrypoint.sh
+RUN chmod +x /runpod_entrypoint.sh
+
+CMD ["/runpod_entrypoint.sh"]
