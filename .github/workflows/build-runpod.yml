@@ -1,0 +1,75 @@
+# Build the TRELLIS.2 RunPod serverless image on GitHub's runners and push it to
+# a container registry. Runs entirely on GitHub infra — no local disk, no Docker
+# on your machine, and NOTHING to do with RunPod's own GitHub integration (so it
+# works even if you're only a member, not owner, of the RunPod team account).
+#
+# Setup (one-time):
+#   1. Push this repo (at minimum: Dockerfile.runpod, runpod_entrypoint.sh,
+#      .dockerignore, this workflow) to a GitHub repo you control (personal is fine).
+#   2. Add repo secrets (Settings -> Secrets and variables -> Actions):
+#        DOCKERHUB_USERNAME  = your Docker Hub username
+#        DOCKERHUB_TOKEN     = a Docker Hub access token (Account Settings -> Security)
+#   3. Run the workflow (Actions tab -> Build RunPod image -> Run workflow), or push.
+#   4. Point the RunPod Serverless endpoint at:
+#        docker.io/<DOCKERHUB_USERNAME>/trellis2-serverless:latest
+#
+# To push to GitHub Container Registry (ghcr.io) instead of Docker Hub, see the
+# commented block at the bottom.
+name: Build RunPod image
+
+on:
+  workflow_dispatch: {}          # manual "Run workflow" button
+  push:
+    paths:                       # also rebuild when the image inputs change
+      - Dockerfile.runpod
+      - runpod_entrypoint.sh
+      - .dockerignore
+      - .github/workflows/build-runpod.yml
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.runpod
+          push: true
+          tags: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/trellis2-serverless:latest
+
+# --- Alternative: push to ghcr.io (no Docker Hub account needed) --------------
+# Replace the "Log in" and "Build and push" steps with:
+#
+#   - name: Log in to GHCR
+#     uses: docker/login-action@v3
+#     with:
+#       registry: ghcr.io
+#       username: ${{ github.actor }}
+#       password: ${{ secrets.GITHUB_TOKEN }}     # auto-provided; add packages: write permission
+#
+#   - name: Build and push
+#     uses: docker/build-push-action@v6
+#     with:
+#       context: .
+#       file: Dockerfile.runpod
+#       push: true
+#       tags: ghcr.io/${{ github.repository_owner }}/trellis2-serverless:latest
+#
+# and add at the job level:
+#   permissions:
+#     contents: read
+#     packages: write
+# (Make the GHCR package public, or add registry credentials on the RunPod endpoint.)
